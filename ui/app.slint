@@ -1,7 +1,10 @@
-import { Button, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 
 export struct Entry { name: string, detail: string, directory: bool, thumbnail: image, has-thumbnail: bool }
 export component App inherits Window {
+    // The application uses a fixed light background, so its widgets must use
+    // the matching palette even when the operating system is in dark mode.
+    init => { Palette.color-scheme = ColorScheme.light; }
     title: "Salt · SMB 客户端";
     preferred-width: 1120px; preferred-height: 760px;
     background: #f4f5f8;
