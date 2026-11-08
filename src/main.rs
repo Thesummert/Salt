@@ -60,42 +60,79 @@ fn update(ui: &slint::Weak<App>, f: impl FnOnce(App) + Send + 'static) {
 fn status(ui: &slint::Weak<App>, message: String) {
     update(ui, move |app| app.set_status(message.into()));
 }
-async fn listing(c: &mut Connection) -> Result<Vec<(String, bool, String)>> {
+async fn listing(c: &mut Connection) -> Result<Vec<smb2::DirectoryEntry>> {
     let mut items = c.client.list_directory(&mut c.tree, &c.path).await?;
     items.retain(|e| e.name != "." && e.name != "..");
-    items.sort_by(|a, b| {
-        b.is_directory
-            .cmp(&a.is_directory)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(items
-        .into_iter()
-        .map(|e| {
-            let detail = if e.is_directory {
-                "文件夹".to_string()
-            } else {
-                format_size(e.size)
-            };
-            (e.name, e.is_directory, detail)
-        })
-        .collect())
+    Ok(items)
 }
-fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<(String, bool, String)>) {
+
+fn sort_entries(app: &App) {
+    let model = app.get_entries();
+    let mut entries: Vec<Entry> = model.iter().collect();
+    let rule = app.get_sort_index();
+    let descending = app.get_sort_descending();
+    entries.sort_by(|a, b| compare_entries(a, b, rule, descending));
+    app.set_listing_generation(app.get_listing_generation().wrapping_add(1));
+    app.set_entries(ModelRc::new(VecModel::from(entries)));
+}
+
+fn compare_entries(a: &Entry, b: &Entry, rule: i32, descending: bool) -> std::cmp::Ordering {
+    let key = match rule {
+        1 => a.kind.cmp(&b.kind),
+        2 => a.size_key.cmp(&b.size_key),
+        3 => a.modified_key.cmp(&b.modified_key),
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    };
+    b.directory
+        .cmp(&a.directory)
+        .then_with(|| if descending { key.reverse() } else { key })
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+}
+
+fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<smb2::DirectoryEntry>) {
     let path = c.path.clone();
     update(ui, move |app| {
         app.set_current_path(path.into());
-        app.set_listing_generation(app.get_listing_generation().wrapping_add(1));
         let entries: Vec<Entry> = entries
             .into_iter()
-            .map(|(name, directory, detail)| Entry {
-                name: name.into(),
-                directory,
-                detail: detail.into(),
-                thumbnail: Default::default(),
-                has_thumbnail: false,
+            .map(|e| {
+                let kind = if e.is_directory {
+                    "文件夹".to_owned()
+                } else {
+                    Path::new(&e.name)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| format!("{} 文件", s.to_uppercase()))
+                        .unwrap_or_else(|| "文件".to_owned())
+                };
+                let modified = e
+                    .modified
+                    .to_system_time()
+                    .map(|time| {
+                        let date: chrono::DateTime<chrono::Local> = time.into();
+                        date.format("%Y-%m-%d %H:%M").to_string()
+                    })
+                    .unwrap_or_else(|| "—".to_owned());
+                Entry {
+                    name: e.name.into(),
+                    directory: e.is_directory,
+                    detail: if e.is_directory {
+                        "—".into()
+                    } else {
+                        format_size(e.size).into()
+                    },
+                    kind: kind.into(),
+                    modified: modified.into(),
+                    size_key: format!("{:020}", e.size).into(),
+                    modified_key: format!("{:020}", e.modified.0).into(),
+                    thumbnail: Default::default(),
+                    has_thumbnail: false,
+                }
             })
             .collect();
         app.set_entries(ModelRc::new(VecModel::from(entries)));
+        sort_entries(&app);
         app.set_selected("".into());
         app.set_selected_directory(false);
         app.set_connected(true);
@@ -550,6 +587,14 @@ fn main() -> Result<()> {
             current_generation.store(generation, std::sync::atomic::Ordering::Relaxed);
         });
     }
+    {
+        let w = app.as_weak();
+        app.on_sort_changed(move || {
+            if let Some(app) = w.upgrade() {
+                sort_entries(&app);
+            }
+        });
+    }
     let send = |cmd: Command, app: &App, tx: &mpsc::Sender<Command>| {
         app.set_busy(true);
         app.set_status("正在处理…".into());
@@ -655,4 +700,35 @@ fn main() -> Result<()> {
     }
     app.run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    #[test]
+    fn sort_uses_numeric_keys_and_keeps_directories_first() {
+        let entry = |name: &str, directory, size: u64, modified: u64| Entry {
+            name: name.into(),
+            directory,
+            size_key: format!("{size:020}").into(),
+            modified_key: format!("{modified:020}").into(),
+            ..Default::default()
+        };
+        let mut items = vec![
+            entry("big", false, 100, 2),
+            entry("small", false, 9, 10),
+            entry("dir", true, 0, 0),
+        ];
+        items.sort_by(|a, b| compare_entries(a, b, 2, false));
+        assert_eq!(
+            items.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["dir", "small", "big"]
+        );
+        items.sort_by(|a, b| compare_entries(a, b, 3, true));
+        assert_eq!(
+            items.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["dir", "small", "big"]
+        );
+    }
 }

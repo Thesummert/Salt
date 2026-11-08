@@ -4194,6 +4194,7 @@ name = "salt-smb"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "directories",
  "image",
  "rfd",

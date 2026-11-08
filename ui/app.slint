@@ -1,6 +1,6 @@
 import { Button, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 
-export struct Entry { name: string, detail: string, directory: bool, thumbnail: image, has-thumbnail: bool }
+export struct Entry { name: string, detail: string, kind: string, modified: string, size-key: string, modified-key: string, directory: bool, thumbnail: image, has-thumbnail: bool }
 export component App inherits Window {
     // The application uses a fixed light background, so its widgets must use
     // the matching palette even when the operating system is in dark mode.
@@ -26,6 +26,10 @@ export component App inherits Window {
     private property <float> preview-ratio: 0.4;
     in property <[Entry]> entries;
     in-out property <int> listing-generation: 0;
+    in-out property <int> sort-index: 0;
+    in-out property <bool> sort-descending: false;
+    in-out property <bool> icon-view: false;
+    callback sort-changed();
     callback thumbnail-request(string, int, int);
     callback generation-changed(int);
     changed listing-generation => { root.generation-changed(root.listing-generation); }
@@ -111,14 +115,24 @@ export component App inherits Window {
                     padding: 16px; spacing: 10px;
                     HorizontalBox {
                         Text { text: "文件"; color: #273248; font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
-                        Text { text: "双击文件夹打开"; color: #a0a9b8; font-size: 12px; }
+                        Text { text: root.entries.length + " 项"; color: #8992a3; font-size: 12px; vertical-alignment: center; }
+                        ComboBox { model: ["名称", "类型", "大小", "修改时间"]; current-index <=> root.sort-index; selected(value) => { root.sort-changed(); } }
+                        Button { text: root.sort-descending ? "降序 ↓" : "升序 ↑"; clicked => { root.sort-descending = !root.sort-descending; root.sort-changed(); } }
+                        Button { text: root.icon-view ? "列表视图" : "图标视图"; clicked => { root.icon-view = !root.icon-view; } }
                     }
                     Rectangle { height: 1px; background: #eef0f4; }
                     if root.entries.length == 0: Rectangle {
                         vertical-stretch: 1;
                         Text { text: root.connected ? "此文件夹为空" : "连接服务器后浏览文件"; color: #a0a9b8; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
                     }
-                    if root.entries.length > 0: ListView {
+                    if root.entries.length > 0 && !root.icon-view: HorizontalLayout {
+                        padding-left: 80px; padding-right: 14px;
+                        Text { text: "名称"; color: #8992a3; horizontal-stretch: 1; }
+                        Text { text: "类型"; color: #8992a3; width: 110px; }
+                        Text { text: "大小"; color: #8992a3; width: 90px; }
+                        Text { text: "修改时间"; color: #8992a3; width: 145px; }
+                    }
+                    if root.entries.length > 0 && !root.icon-view: ListView {
                         for entry[index] in root.entries: Rectangle {
                             height: 76px; border-radius: 8px;
                             background: root.selected == entry.name ? #edf1ff : row-touch.has-hover ? #f6f7fa : white;
@@ -139,7 +153,9 @@ export component App inherits Window {
                                     Text { text: entry.name; color: #273248; font-size: 14px; font-weight: 600; vertical-alignment: bottom; overflow: elide; }
                                     Text { text: entry.directory ? "文件夹" : "文件"; color: #a0a9b8; font-size: 12px; }
                                 }
-                                Text { text: entry.directory ? "›" : entry.detail; color: #9aa5b5; font-size: entry.directory ? 22px : 12px; vertical-alignment: center; }
+                                Text { text: entry.kind; color: #7c8799; font-size: 12px; width: 96px; vertical-alignment: center; overflow: elide; }
+                                Text { text: entry.detail; color: #7c8799; font-size: 12px; width: 76px; vertical-alignment: center; }
+                                Text { text: entry.modified; color: #7c8799; font-size: 12px; width: 145px; vertical-alignment: center; }
                             }
                             init => { if !entry.directory && !entry.has-thumbnail { root.thumbnail-request(entry.name, index, root.listing-generation); } }
                             row-touch := TouchArea {
@@ -151,6 +167,39 @@ export component App inherits Window {
                                     }
                                 }
                                 double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } }
+                            }
+                        }
+                    }
+                    if root.entries.length > 0 && root.icon-view: grid := ListView {
+                        property <int> columns: max(1, floor(self.width / 150px));
+                        for row in ceil(root.entries.length / self.columns): Rectangle {
+                            height: 156px;
+                            for col in grid.columns: Rectangle {
+                                property <int> entry-index: row * grid.columns + col;
+                                if entry-index < root.entries.length: Rectangle {
+                                    x: col * 150px; width: 142px; height: 150px; border-radius: 8px;
+                                    background: root.selected == root.entries[entry-index].name ? #edf1ff : tile-touch.has-hover ? #f6f7fa : white;
+                                    VerticalLayout {
+                                        padding: 8px; spacing: 4px;
+                                        Rectangle {
+                                            width: 76px; height: 76px; border-radius: 9px;
+                                            background: root.entries[entry-index].directory ? #fff4dc : #eef1f8;
+                                            if root.entries[entry-index].has-thumbnail: Image { width: 68px; height: 68px; source: root.entries[entry-index].thumbnail; image-fit: contain; }
+                                            if !root.entries[entry-index].has-thumbnail: Text {
+                                                text: root.entries[entry-index].directory ? "▰" : "▤"; font-size: 38px;
+                                                color: root.entries[entry-index].directory ? #e6a63a : #7c8dab;
+                                                horizontal-alignment: center; vertical-alignment: center;
+                                            }
+                                        }
+                                        Text { text: root.entries[entry-index].name; color: #273248; font-size: 12px; horizontal-alignment: center; overflow: elide; }
+                                        Text { text: root.entries[entry-index].directory ? "文件夹" : root.entries[entry-index].detail; color: #8992a3; font-size: 11px; horizontal-alignment: center; }
+                                    }
+                                    init => { if !root.entries[entry-index].directory && !root.entries[entry-index].has-thumbnail { root.thumbnail-request(root.entries[entry-index].name, entry-index, root.listing-generation); } }
+                                    tile-touch := TouchArea {
+                                        clicked => { if !root.busy { root.selected = root.entries[entry-index].name; root.selected-directory = root.entries[entry-index].directory; if !root.selected-directory { root.preview(root.selected); } } }
+                                        double-clicked => { if root.entries[entry-index].directory && !root.busy { root.navigate(root.entries[entry-index].name); } }
+                                    }
+                                }
                             }
                         }
                     }
