@@ -1,5 +1,8 @@
+mod history;
+
 use anyhow::{Context, Result, bail};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use history::{HistoryEntry, HistoryStore};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
     path::{Path, PathBuf},
     sync::mpsc,
@@ -24,6 +27,9 @@ enum Command {
     Upload(PathBuf),
     Download(String, PathBuf),
     Preview(String),
+    SelectHistory(usize),
+    DeleteHistory(usize),
+    Thumbnail(String, String, usize, i32),
 }
 fn remote_path(dir: &str, name: &str) -> String {
     if dir.is_empty() {
@@ -54,7 +60,7 @@ fn update(ui: &slint::Weak<App>, f: impl FnOnce(App) + Send + 'static) {
 fn status(ui: &slint::Weak<App>, message: String) {
     update(ui, move |app| app.set_status(message.into()));
 }
-async fn listing(c: &mut Connection) -> Result<Vec<Entry>> {
+async fn listing(c: &mut Connection) -> Result<Vec<(String, bool, String)>> {
     let mut items = c.client.list_directory(&mut c.tree, &c.path).await?;
     items.retain(|e| e.name != "." && e.name != "..");
     items.sort_by(|a, b| {
@@ -64,21 +70,31 @@ async fn listing(c: &mut Connection) -> Result<Vec<Entry>> {
     });
     Ok(items
         .into_iter()
-        .map(|e| Entry {
-            name: e.name.into(),
-            directory: e.is_directory,
-            detail: if e.is_directory {
-                "文件夹".into()
+        .map(|e| {
+            let detail = if e.is_directory {
+                "文件夹".to_string()
             } else {
-                format_size(e.size).into()
-            },
+                format_size(e.size)
+            };
+            (e.name, e.is_directory, detail)
         })
         .collect())
 }
-fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<Entry>) {
+fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<(String, bool, String)>) {
     let path = c.path.clone();
     update(ui, move |app| {
         app.set_current_path(path.into());
+        app.set_listing_generation(app.get_listing_generation().wrapping_add(1));
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .map(|(name, directory, detail)| Entry {
+                name: name.into(),
+                directory,
+                detail: detail.into(),
+                thumbnail: Default::default(),
+                has_thumbnail: false,
+            })
+            .collect();
         app.set_entries(ModelRc::new(VecModel::from(entries)));
         app.set_selected("".into());
         app.set_connected(true);
@@ -86,10 +102,23 @@ fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<Entry>) {
         app.set_showing_image(false);
     });
 }
+fn show_history(ui: &slint::Weak<App>, history: &HistoryStore) {
+    let mut labels = vec![slint::SharedString::from("选择历史连接")];
+    labels.extend(
+        history.entries.iter().map(|entry| {
+            format!("{} / {}  ·  {}", entry.server, entry.share, entry.username).into()
+        }),
+    );
+    update(ui, move |app| {
+        app.set_history_labels(ModelRc::new(VecModel::from(labels)));
+        app.set_history_index(0);
+    });
+}
 async fn run_command(
     cmd: Command,
     state: &mut Option<Connection>,
     ui: &slint::Weak<App>,
+    history: &mut Option<HistoryStore>,
 ) -> Result<()> {
     match cmd {
         Command::Connect(server, share, user, password) => {
@@ -120,8 +149,44 @@ async fn run_command(
             };
             let entries = listing(&mut c).await.context("无法读取共享目录")?;
             show_listing(ui, &c, entries);
+            update(ui, |app| app.set_show_connection(false));
             *state = Some(c);
-            status(ui, "连接成功".into());
+            if let Some(history) = history {
+                let record = HistoryEntry {
+                    server: server.to_owned(),
+                    share: share.trim().to_owned(),
+                    username: user,
+                };
+                let saved = history.record(record);
+                show_history(ui, history);
+                match saved {
+                    Ok(()) => status(ui, "连接成功".into()),
+                    Err(e) => status(ui, format!("连接成功，但历史记录保存失败：{e:#}")),
+                }
+            } else {
+                status(ui, "连接成功，但历史记录不可用".into());
+            }
+        }
+        Command::Thumbnail(..) => unreachable!("thumbnail requests are handled by the worker"),
+        Command::SelectHistory(index) => {
+            let entry = history
+                .as_ref()
+                .and_then(|h| h.entries.get(index))
+                .context("历史记录不存在")?
+                .clone();
+            update(ui, move |app| {
+                app.set_server(entry.server.into());
+                app.set_share(entry.share.into());
+                app.set_username(entry.username.into());
+                app.set_password("".into());
+                app.set_status("已填入历史连接，请输入密码".into());
+            });
+        }
+        Command::DeleteHistory(index) => {
+            let history = history.as_mut().context("历史记录不可用")?;
+            history.delete(index)?;
+            show_history(ui, history);
+            status(ui, "历史记录已删除".into());
         }
         Command::Navigate(name) => {
             let c = state.as_mut().context("尚未连接")?;
@@ -319,20 +384,159 @@ fn main() -> Result<()> {
     let app = App::new()?;
     let weak = app.as_weak();
     let (tx, rx) = mpsc::channel::<Command>();
+    let current_generation = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let worker_generation = current_generation.clone();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("创建运行时失败");
-        let mut state = None;
+        let mut state: Option<Connection> = None;
+        let mut history = match HistoryStore::load_default() {
+            Ok(history) => {
+                show_history(&weak, &history);
+                Some(history)
+            }
+            Err(e) => {
+                status(&weak, format!("无法加载历史记录：{e:#}"));
+                None
+            }
+        };
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         for cmd in rx {
-            let result = runtime.block_on(run_command(cmd, &mut state, &weak));
+            if let Command::Thumbnail(ref name, ref path, index, generation) = cmd {
+                let ext = Path::new(name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !matches!(
+                    ext.as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                ) {
+                    continue;
+                }
+                if generation != worker_generation.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+                let Some(c) = state.as_mut() else {
+                    continue;
+                };
+                if &c.path != path {
+                    continue;
+                }
+                let key = (generation, index);
+                {
+                    let mut pending = pending.lock().unwrap();
+                    if pending.contains(&key) {
+                        continue;
+                    }
+                    if pending.len() >= 64 {
+                        let retry_name = name.clone();
+                        update(&weak, move |app| {
+                            let retry_ui = app.as_weak();
+                            slint::Timer::single_shot(Duration::from_millis(300), move || {
+                                if let Some(app) = retry_ui.upgrade() {
+                                    if app.get_listing_generation() == generation {
+                                        app.invoke_thumbnail_request(
+                                            retry_name.into(),
+                                            index as i32,
+                                            generation,
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                        continue;
+                    }
+                    pending.insert(key);
+                }
+                let reader =
+                    runtime.block_on(c.client.open_file_reader(&c.tree, &remote_path(path, name)));
+                let Ok(reader) = reader else {
+                    pending.lock().unwrap().remove(&key);
+                    continue;
+                };
+                let permits = permits.clone();
+                let pending = pending.clone();
+                let weak = weak.clone();
+                let current = worker_generation.clone();
+                let name = name.clone();
+                runtime.spawn(async move {
+                    let _permit = match permits.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    let result: Result<_> = async {
+                        if generation != current.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Ok(None);
+                        }
+                        let size = reader.size();
+                        if size > 16 * 1024 * 1024 {
+                            reader.close().await?;
+                            return Ok(None);
+                        }
+                        let data = reader.read_at(0, size).await?;
+                        reader.close().await?;
+                        if generation != current.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Ok(None);
+                        }
+                        let pixels = tokio::task::spawn_blocking(move || -> Result<_> {
+                            let mut decoder = image::ImageReader::new(std::io::Cursor::new(data))
+                                .with_guessed_format()?;
+                            let mut limits = image::Limits::default();
+                            limits.max_alloc = Some(64 * 1024 * 1024);
+                            limits.max_image_width = Some(8192);
+                            limits.max_image_height = Some(8192);
+                            decoder.limits(limits);
+                            let pixels = decoder
+                                .decode()?
+                                .resize(96, 96, image::imageops::FilterType::Triangle)
+                                .to_rgba8();
+                            Ok((pixels.width(), pixels.height(), pixels.into_raw()))
+                        })
+                        .await??;
+                        Ok(Some(pixels))
+                    }
+                    .await;
+                    pending.lock().unwrap().remove(&key);
+                    if let Ok(Some((width, height, bytes))) = result {
+                        update(&weak, move |app| {
+                            if app.get_listing_generation() != generation {
+                                return;
+                            }
+                            let model = app.get_entries();
+                            if let Some(mut item) = model.row_data(index) {
+                                if item.name.as_str() != name {
+                                    return;
+                                }
+                                let buffer =
+                                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                        &bytes, width, height,
+                                    );
+                                item.thumbnail = slint::Image::from_rgba8(buffer);
+                                item.has_thumbnail = true;
+                                model.set_row_data(index, item);
+                            }
+                        });
+                    }
+                });
+                continue;
+            }
+            let result = runtime.block_on(run_command(cmd, &mut state, &weak, &mut history));
             if let Err(e) = result {
                 status(&weak, format!("操作失败：{e:#}"));
             }
             update(&weak, |app| app.set_busy(false));
         }
     });
+    {
+        let current_generation = current_generation.clone();
+        app.on_generation_changed(move |generation| {
+            current_generation.store(generation, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
     let send = |cmd: Command, app: &App, tx: &mpsc::Sender<Command>| {
         app.set_busy(true);
         app.set_status("正在处理…".into());
@@ -351,6 +555,42 @@ fn main() -> Result<()> {
                     &a,
                     &tx,
                 );
+            }
+        });
+    }
+    {
+        let w = app.as_weak();
+        let tx = tx.clone();
+        app.on_select_history(move |index| {
+            if let Some(a) = w.upgrade() {
+                if let Ok(index) = usize::try_from(index) {
+                    send(Command::SelectHistory(index), &a, &tx);
+                }
+            }
+        });
+    }
+    {
+        let w = app.as_weak();
+        let tx = tx.clone();
+        app.on_delete_history(move |index| {
+            if let Some(a) = w.upgrade() {
+                if let Ok(index) = usize::try_from(index) {
+                    send(Command::DeleteHistory(index), &a, &tx);
+                }
+            }
+        });
+    }
+    {
+        let w = app.as_weak();
+        let tx = tx.clone();
+        app.on_thumbnail_request(move |name, index, generation| {
+            if let Some(a) = w.upgrade() {
+                let _ = tx.send(Command::Thumbnail(
+                    name.to_string(),
+                    a.get_current_path().to_string(),
+                    index as usize,
+                    generation,
+                ));
             }
         });
     }

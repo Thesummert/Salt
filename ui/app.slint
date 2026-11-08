@@ -1,10 +1,10 @@
-import { Button, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
 
-export struct Entry { name: string, detail: string, directory: bool }
+export struct Entry { name: string, detail: string, directory: bool, thumbnail: image, has-thumbnail: bool }
 export component App inherits Window {
     title: "Salt · SMB 客户端";
-    width: 1060px; height: 720px;
-    background: #f4f6fa;
+    width: 1120px; height: 760px;
+    background: #f4f5f8;
     in-out property <string> server: "";
     in-out property <string> share: "";
     in-out property <string> username: "";
@@ -14,34 +14,79 @@ export component App inherits Window {
     in-out property <string> selected: "";
     in-out property <bool> selected-directory: false;
     in-out property <bool> connected: false;
+    in-out property <bool> show-connection: true;
     in-out property <bool> busy: false;
     in-out property <string> preview-text: "选择文件后点击预览";
     in-out property <image> preview-image;
     in-out property <bool> showing-image: false;
     in property <[Entry]> entries;
+    in-out property <int> listing-generation: 0;
+    callback thumbnail-request(string, int, int);
+    callback generation-changed(int);
+    changed listing-generation => { root.generation-changed(root.listing-generation); }
+    in property <[string]> history-labels: ["选择历史连接"];
+    in-out property <int> history-index: 0;
     callback connect-request(string, string, string, string);
+    callback select-history(int);
+    callback delete-history(int);
     callback navigate(string);
     callback upload();
     callback download(string);
     callback preview(string);
 
     VerticalBox {
-        padding: 20px; spacing: 12px;
-        Text { text: "Salt"; font-size: 25px; font-weight: 700; color: #17263e; }
-        Text { text: "SMB 文件工作台"; font-size: 13px; color: #6b7a90; }
+        padding: 24px; spacing: 14px;
         HorizontalBox {
-            spacing: 8px;
-            LineEdit { placeholder-text: "服务器或 IP（可带端口）"; text <=> root.server; enabled: !root.busy; }
-            LineEdit { placeholder-text: "共享名称"; text <=> root.share; enabled: !root.busy; }
-            LineEdit { placeholder-text: "用户名"; text <=> root.username; enabled: !root.busy; }
-            LineEdit { placeholder-text: "密码"; text <=> root.password; input-type: InputType.password; enabled: !root.busy; }
-            Button { text: "连接"; enabled: !root.busy; clicked => { root.connect-request(root.server, root.share, root.username, root.password); } }
+            spacing: 12px;
+            Rectangle {
+                width: 42px; height: 42px; border-radius: 12px; background: #445fe8;
+                Text { text: "S"; color: white; font-size: 22px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+            }
+            VerticalBox {
+                spacing: 2px; horizontal-stretch: 1;
+                Text { text: "Salt"; font-size: 22px; font-weight: 700; color: #1c2435; }
+                Text { text: "SMB 文件工作台"; font-size: 12px; color: #8992a3; }
+            }
+            Text { text: root.connected ? "●  已连接" : "○  未连接"; color: root.connected ? #27876d : #8992a3; font-size: 13px; vertical-alignment: center; }
+            if root.connected: Button { text: root.show-connection ? "收起连接" : "切换连接"; enabled: !root.busy; clicked => { root.show-connection = !root.show-connection; } }
+        }
+        if root.show-connection: Rectangle {
+            background: white; border-radius: 12px;
+            VerticalBox {
+                padding: 16px; spacing: 10px;
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "连接到服务器"; font-size: 14px; font-weight: 700; color: #273248; horizontal-stretch: 1; }
+                    Text { text: "SMB / 网络共享"; font-size: 12px; color: #9aa3b2; }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit { placeholder-text: "服务器或 IP（可带端口）"; text <=> root.server; enabled: !root.busy; }
+                    LineEdit { placeholder-text: "共享名称"; text <=> root.share; enabled: !root.busy; }
+                    LineEdit { placeholder-text: "用户名"; text <=> root.username; enabled: !root.busy; }
+                    LineEdit { placeholder-text: "密码"; text <=> root.password; input-type: InputType.password; enabled: !root.busy; }
+                    Button { text: "连接"; enabled: !root.busy; clicked => { root.connect-request(root.server, root.share, root.username, root.password); } }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "历史连接"; vertical-alignment: center; color: #778296; font-size: 12px; }
+                    ComboBox {
+                        model: root.history-labels; current-index <=> root.history-index;
+                        enabled: !root.busy && root.history-labels.length > 1; horizontal-stretch: 1;
+                        selected(value) => { if self.current-index > 0 { root.select-history(self.current-index - 1); } }
+                    }
+                    Button { text: "删除记录"; enabled: !root.busy && root.history-index > 0; clicked => { root.delete-history(root.history-index - 1); } }
+                }
+            }
         }
         HorizontalBox {
             spacing: 8px;
-            Button { text: "上一级"; enabled: root.connected && !root.busy && root.current-path != ""; clicked => { root.navigate(".."); } }
+            Button { text: "← 上一级"; enabled: root.connected && !root.busy && root.current-path != ""; clicked => { root.navigate(".."); } }
             Button { text: "刷新"; enabled: root.connected && !root.busy; clicked => { root.navigate("."); } }
-            Text { text: "/" + root.current-path; vertical-alignment: center; color: #40516a; horizontal-stretch: 1; overflow: elide; }
+            Rectangle {
+                background: #e9ecf3; border-radius: 6px; horizontal-stretch: 1;
+                Text { x: 12px; width: parent.width - 24px; text: "/" + root.current-path; vertical-alignment: center; color: #536079; font-size: 13px; overflow: elide; }
+            }
             Button { text: "上传文件"; enabled: root.connected && !root.busy; clicked => { root.upload(); } }
             Button { text: "下载"; enabled: root.connected && !root.busy && root.selected != "" && !root.selected-directory; clicked => { root.download(root.selected); } }
             Button { text: "预览"; enabled: root.connected && !root.busy && root.selected != "" && !root.selected-directory; clicked => { root.preview(root.selected); } }
@@ -49,34 +94,63 @@ export component App inherits Window {
         HorizontalBox {
             spacing: 14px; vertical-stretch: 1;
             Rectangle {
-                background: white; border-radius: 8px; horizontal-stretch: 3;
+                background: white; border-radius: 12px; horizontal-stretch: 3;
                 VerticalBox {
-                    padding: 12px; spacing: 5px;
-                    Text { text: "文件  /  点击选中，双击目录打开"; color: #718097; font-size: 13px; }
-                    ListView {
-                        for entry in root.entries: Rectangle {
-                            height: 42px; background: root.selected == entry.name ? #e7efff : white;
+                    padding: 16px; spacing: 10px;
+                    HorizontalBox {
+                        Text { text: "文件"; color: #273248; font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
+                        Text { text: "双击文件夹打开"; color: #a0a9b8; font-size: 12px; }
+                    }
+                    Rectangle { height: 1px; background: #eef0f4; }
+                    if root.entries.length == 0: Rectangle {
+                        vertical-stretch: 1;
+                        Text { text: root.connected ? "此文件夹为空" : "连接服务器后浏览文件"; color: #a0a9b8; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    if root.entries.length > 0: ListView {
+                        for entry[index] in root.entries: Rectangle {
+                            height: 76px; border-radius: 8px;
+                            background: root.selected == entry.name ? #edf1ff : row-touch.has-hover ? #f6f7fa : white;
                             HorizontalLayout {
-                                padding-left: 10px; padding-right: 10px; spacing: 10px;
-                                Text { text: entry.directory ? "▸" : "·"; color: #4d75b4; vertical-alignment: center; }
-                                Text { text: entry.name; color: #25354d; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                                Text { text: entry.detail; color: #8491a5; vertical-alignment: center; }
+                                padding-left: 10px; padding-right: 14px; spacing: 14px;
+                                Rectangle {
+                                    width: 56px; height: 56px; border-radius: 9px;
+                                    background: entry.directory ? #fff4dc : #eef1f8;
+                                    if entry.has-thumbnail: Image { x: 4px; y: 4px; width: 48px; height: 48px; source: entry.thumbnail; image-fit: contain; }
+                                    if !entry.has-thumbnail: Text {
+                                        text: entry.directory ? "▰" : "▤"; font-size: 30px;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                        color: entry.directory ? #e6a63a : #7c8dab;
+                                    }
+                                }
+                                VerticalLayout {
+                                    spacing: 4px; horizontal-stretch: 1;
+                                    Text { text: entry.name; color: #273248; font-size: 14px; font-weight: 600; vertical-alignment: bottom; overflow: elide; }
+                                    Text { text: entry.directory ? "文件夹" : "文件"; color: #a0a9b8; font-size: 12px; }
+                                }
+                                Text { text: entry.directory ? "›" : entry.detail; color: #9aa5b5; font-size: entry.directory ? 22px : 12px; vertical-alignment: center; }
                             }
-                            TouchArea { clicked => { root.selected = entry.name; root.selected-directory = entry.directory; } double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } } }
+                            init => { if !entry.directory && !entry.has-thumbnail { root.thumbnail-request(entry.name, index, root.listing-generation); } }
+                            row-touch := TouchArea { clicked => { root.selected = entry.name; root.selected-directory = entry.directory; } double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } } }
                         }
                     }
                 }
             }
             Rectangle {
-                background: white; border-radius: 8px; horizontal-stretch: 2;
+                background: white; border-radius: 12px; horizontal-stretch: 2;
                 VerticalBox {
-                    padding: 12px; spacing: 8px;
-                    Text { text: "预览"; color: #40516a; font-weight: 600; }
+                    padding: 16px; spacing: 10px;
+                    Text { text: "预览"; color: #273248; font-size: 15px; font-weight: 700; }
+                    Text { text: root.selected == "" ? "选择文件以查看内容" : root.selected; color: #9aa3b2; font-size: 12px; overflow: elide; }
+                    Rectangle { height: 1px; background: #eef0f4; }
                     if root.showing-image: Image { source: root.preview-image; image-fit: contain; vertical-stretch: 1; }
                     if !root.showing-image: TextEdit { text: root.preview-text; read-only: true; vertical-stretch: 1; }
                 }
             }
         }
-        Text { text: root.status; color: #5f7089; font-size: 13px; overflow: elide; }
+        HorizontalBox {
+            spacing: 7px;
+            Text { text: "●"; color: root.busy ? #e6a63a : root.connected ? #36a581 : #b5becb; font-size: 9px; vertical-alignment: center; }
+            Text { text: root.status; color: #7c8799; font-size: 12px; overflow: elide; horizontal-stretch: 1; }
+        }
     }
 }
