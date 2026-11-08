@@ -1,6 +1,6 @@
 import { Button, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 
-export struct Entry { name: string, detail: string, kind: string, modified: string, size-key: string, modified-key: string, directory: bool, thumbnail: image, has-thumbnail: bool }
+export struct Entry { name: string, detail: string, kind: string, modified: string, size-key: string, modified-key: string, directory: bool, link: bool, thumbnail: image, has-thumbnail: bool }
 export component App inherits Window {
     // The application uses a fixed light background, so its widgets must use
     // the matching palette even when the operating system is in dark mode.
@@ -29,6 +29,17 @@ export component App inherits Window {
     in-out property <int> sort-index: 0;
     in-out property <bool> sort-descending: false;
     in-out property <bool> icon-view: false;
+    in-out property <float> list-scale: 1;
+    in-out property <float> icon-scale: 1;
+    in-out property <bool> renaming: false;
+    in-out property <string> rename-source: "";
+    in-out property <string> rename-value: "";
+    callback rename-request(string, string);
+    callback delete-request(string, bool, bool);
+    function zoom(delta: length) {
+        if root.icon-view { root.icon-scale = clamp(root.icon-scale + clamp(delta / 120px, -1, 1) * 0.1, 0.6, 2.0); }
+        else { root.list-scale = clamp(root.list-scale + clamp(delta / 120px, -1, 1) * 0.1, 0.6, 2.0); }
+    }
     callback sort-changed();
     callback thumbnail-request(string, int, int);
     callback generation-changed(int);
@@ -134,16 +145,16 @@ export component App inherits Window {
                     }
                     if root.entries.length > 0 && !root.icon-view: ListView {
                         for entry[index] in root.entries: Rectangle {
-                            height: 76px; border-radius: 8px;
+                            height: 76px * root.list-scale; border-radius: 8px;
                             background: root.selected == entry.name ? #edf1ff : row-touch.has-hover ? #f6f7fa : white;
                             HorizontalLayout {
                                 padding-left: 10px; padding-right: 14px; spacing: 14px;
                                 Rectangle {
-                                    width: 56px; height: 56px; border-radius: 9px;
+                                    width: 56px * root.list-scale; height: 56px * root.list-scale; border-radius: 9px;
                                     background: entry.directory ? #fff4dc : #eef1f8;
-                                    if entry.has-thumbnail: Image { x: 4px; y: 4px; width: 48px; height: 48px; source: entry.thumbnail; image-fit: contain; }
+                                    if entry.has-thumbnail: Image { x: 4px; y: 4px; width: 48px * root.list-scale; height: 48px * root.list-scale; source: entry.thumbnail; image-fit: contain; }
                                     if !entry.has-thumbnail: Text {
-                                        text: entry.directory ? "▰" : "▤"; font-size: 30px;
+                                        text: entry.directory ? "▰" : "▤"; font-size: 30px * root.list-scale;
                                         horizontal-alignment: center; vertical-alignment: center;
                                         color: entry.directory ? #e6a63a : #7c8dab;
                                     }
@@ -158,7 +169,25 @@ export component App inherits Window {
                                 Text { text: entry.modified; color: #7c8799; font-size: 12px; width: 145px; vertical-alignment: center; }
                             }
                             init => { if !entry.directory && !entry.has-thumbnail { root.thumbnail-request(entry.name, index, root.listing-generation); } }
+                            row-menu := ContextMenuArea {
+                                enabled: !root.busy;
+                                Menu {
+                                    MenuItem { title: "打开文件夹"; enabled: entry.directory; activated => { root.navigate(entry.name); } }
+                                    MenuItem { title: "预览"; enabled: !entry.directory; activated => { root.selected = entry.name; root.selected-directory = false; root.preview(entry.name); } }
+                                    MenuItem { title: "下载"; enabled: !entry.directory; activated => { root.download(entry.name); } }
+                                    MenuSeparator { }
+                                    MenuItem { title: "重命名"; activated => { root.rename-source = entry.name; root.rename-value = entry.name; root.renaming = true; } }
+                                    MenuItem { title: "删除"; activated => { root.delete-request(entry.name, entry.directory, entry.link); } }
+                                    MenuSeparator { }
+                                    MenuItem { title: "刷新"; activated => { root.navigate("."); } }
+                                }
                             row-touch := TouchArea {
+                                pointer-event(event) => {
+                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && !root.busy {
+                                        row-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                    }
+                                }
+                                scroll-event(event) => { if (event.modifiers.control || event.modifiers.meta) && event.delta-y != 0px { root.zoom(event.delta-y); return EventResult.accept; } return EventResult.reject; }
                                 clicked => {
                                     if !root.busy {
                                         root.selected = entry.name;
@@ -168,25 +197,31 @@ export component App inherits Window {
                                 }
                                 double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } }
                             }
+                            }
                         }
                     }
                     if root.entries.length > 0 && root.icon-view: grid := ListView {
-                        property <int> columns: max(1, floor(self.width / 150px));
+                        property <int> columns: max(1, floor(self.width / (150px * root.icon-scale)));
                         for row in ceil(root.entries.length / self.columns): Rectangle {
-                            height: 156px;
+                            height: 156px * root.icon-scale;
                             for col in grid.columns: Rectangle {
                                 property <int> entry-index: row * grid.columns + col;
+                                changed entry-index => {
+                                    if entry-index < root.entries.length && !root.entries[entry-index].directory && !root.entries[entry-index].has-thumbnail {
+                                        root.thumbnail-request(root.entries[entry-index].name, entry-index, root.listing-generation);
+                                    }
+                                }
                                 if entry-index < root.entries.length: Rectangle {
-                                    x: col * 150px; width: 142px; height: 150px; border-radius: 8px;
+                                    x: col * 150px * root.icon-scale; width: 142px * root.icon-scale; height: 150px * root.icon-scale; border-radius: 8px;
                                     background: root.selected == root.entries[entry-index].name ? #edf1ff : tile-touch.has-hover ? #f6f7fa : white;
                                     VerticalLayout {
                                         padding: 8px; spacing: 4px;
                                         Rectangle {
-                                            width: 76px; height: 76px; border-radius: 9px;
+                                            width: 76px * root.icon-scale; height: 76px * root.icon-scale; border-radius: 9px;
                                             background: root.entries[entry-index].directory ? #fff4dc : #eef1f8;
-                                            if root.entries[entry-index].has-thumbnail: Image { width: 68px; height: 68px; source: root.entries[entry-index].thumbnail; image-fit: contain; }
+                                            if root.entries[entry-index].has-thumbnail: Image { width: 68px * root.icon-scale; height: 68px * root.icon-scale; source: root.entries[entry-index].thumbnail; image-fit: contain; }
                                             if !root.entries[entry-index].has-thumbnail: Text {
-                                                text: root.entries[entry-index].directory ? "▰" : "▤"; font-size: 38px;
+                                                text: root.entries[entry-index].directory ? "▰" : "▤"; font-size: 38px * root.icon-scale;
                                                 color: root.entries[entry-index].directory ? #e6a63a : #7c8dab;
                                                 horizontal-alignment: center; vertical-alignment: center;
                                             }
@@ -195,10 +230,29 @@ export component App inherits Window {
                                         Text { text: root.entries[entry-index].directory ? "文件夹" : root.entries[entry-index].detail; color: #8992a3; font-size: 11px; horizontal-alignment: center; }
                                     }
                                     init => { if !root.entries[entry-index].directory && !root.entries[entry-index].has-thumbnail { root.thumbnail-request(root.entries[entry-index].name, entry-index, root.listing-generation); } }
+                                    tile-menu := ContextMenuArea {
+                                enabled: !root.busy;
+                                Menu {
+                                    MenuItem { title: "打开文件夹"; enabled: root.entries[entry-index].directory; activated => { root.navigate(root.entries[entry-index].name); } }
+                                    MenuItem { title: "预览"; enabled: !root.entries[entry-index].directory; activated => { root.selected = root.entries[entry-index].name; root.selected-directory = false; root.preview(root.entries[entry-index].name); } }
+                                    MenuItem { title: "下载"; enabled: !root.entries[entry-index].directory; activated => { root.download(root.entries[entry-index].name); } }
+                                    MenuSeparator { }
+                                    MenuItem { title: "重命名"; activated => { root.rename-source = root.entries[entry-index].name; root.rename-value = root.entries[entry-index].name; root.renaming = true; } }
+                                    MenuItem { title: "删除"; activated => { root.delete-request(root.entries[entry-index].name, root.entries[entry-index].directory, root.entries[entry-index].link); } }
+                                    MenuSeparator { }
+                                    MenuItem { title: "刷新"; activated => { root.navigate("."); } }
+                                }
                                     tile-touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && !root.busy {
+                                                tile-menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                            }
+                                        }
+                                scroll-event(event) => { if (event.modifiers.control || event.modifiers.meta) && event.delta-y != 0px { root.zoom(event.delta-y); return EventResult.accept; } return EventResult.reject; }
                                         clicked => { if !root.busy { root.selected = root.entries[entry-index].name; root.selected-directory = root.entries[entry-index].directory; if !root.selected-directory { root.preview(root.selected); } } }
                                         double-clicked => { if root.entries[entry-index].directory && !root.busy { root.navigate(root.entries[entry-index].name); } }
                                     }
+                            }
                                 }
                             }
                         }
@@ -243,4 +297,22 @@ export component App inherits Window {
             Text { text: root.status; color: #7c8799; font-size: 12px; overflow: elide; horizontal-stretch: 1; }
         }
     }
+    if root.renaming: Rectangle {
+        background: #00000066;
+        TouchArea { }
+        Rectangle {
+            width: 400px; height: 168px; border-radius: 12px; background: white;
+            VerticalLayout {
+                padding: 18px; spacing: 12px;
+                Text { text: "重命名"; color: #273248; font-size: 16px; font-weight: 700; }
+                LineEdit { text <=> root.rename-value; }
+                HorizontalLayout {
+                    alignment: end; spacing: 8px;
+                    Button { text: "取消"; clicked => { root.renaming = false; } }
+                    Button { text: "确定"; enabled: root.rename-value != ""; clicked => { root.renaming = false; root.rename-request(root.rename-source, root.rename-value); } }
+                }
+            }
+        }
+    }
+
 }

@@ -30,6 +30,8 @@ enum Command {
     SelectHistory(usize),
     DeleteHistory(usize),
     Thumbnail(String, String, usize, i32),
+    Rename(String, String),
+    Delete(String, bool, bool),
 }
 fn remote_path(dir: &str, name: &str) -> String {
     if dir.is_empty() {
@@ -37,6 +39,9 @@ fn remote_path(dir: &str, name: &str) -> String {
     } else {
         format!("{dir}/{name}")
     }
+}
+fn valid_entry_name(name: &str) -> bool {
+    !name.trim().is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 fn format_size(size: u64) -> String {
     if size < 1024 {
@@ -115,6 +120,7 @@ fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<smb2::Direct
                     })
                     .unwrap_or_else(|| "—".to_owned());
                 Entry {
+                    link: e.is_link(),
                     name: e.name.into(),
                     directory: e.is_directory,
                     detail: if e.is_directory {
@@ -249,6 +255,43 @@ async fn run_command(
                     return Err(e);
                 }
             }
+        }
+        Command::Rename(name, new_name) => {
+            if !valid_entry_name(&new_name) {
+                bail!("名称不能为空、.、.. 或包含路径分隔符");
+            }
+            if name == new_name {
+                return Ok(());
+            }
+            let c = state.as_mut().context("尚未连接")?;
+            c.client
+                .rename(
+                    &c.tree,
+                    &remote_path(&c.path, &name),
+                    &remote_path(&c.path, &new_name),
+                )
+                .await
+                .context("重命名失败")?;
+            let entries = listing(c).await?;
+            show_listing(ui, c, entries);
+            status(ui, format!("已重命名：{new_name}"));
+        }
+        Command::Delete(name, directory, link) => {
+            let c = state.as_mut().context("尚未连接")?;
+            let path = remote_path(&c.path, &name);
+            if link {
+                c.client.delete_link(&c.tree, &path).await?;
+            } else if directory {
+                c.client
+                    .delete_directory(&c.tree, &path)
+                    .await
+                    .context("无法删除文件夹（请确认文件夹为空）")?;
+            } else {
+                c.client.delete_file(&c.tree, &path).await?;
+            }
+            let entries = listing(c).await?;
+            show_listing(ui, c, entries);
+            status(ui, format!("已删除：{name}"));
         }
         Command::Upload(local) => {
             let c = state.as_mut().context("尚未连接")?;
@@ -606,6 +649,45 @@ fn main() -> Result<()> {
     {
         let w = app.as_weak();
         let tx = tx.clone();
+        app.on_rename_request(move |name, new_name| {
+            if let Some(app) = w.upgrade() {
+                send(
+                    Command::Rename(name.to_string(), new_name.to_string()),
+                    &app,
+                    &tx,
+                );
+            }
+        });
+    }
+    {
+        let w = app.as_weak();
+        let tx = tx.clone();
+        app.on_delete_request(move |name, directory, link| {
+            if let Some(app) = w.upgrade() {
+                let message = if directory && !link {
+                    format!("确定删除空文件夹“{name}”吗？")
+                } else {
+                    format!("确定删除“{name}”吗？")
+                };
+                if rfd::MessageDialog::new()
+                    .set_title("确认删除")
+                    .set_description(&message)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    == rfd::MessageDialogResult::Yes
+                {
+                    send(
+                        Command::Delete(name.to_string(), directory, link),
+                        &app,
+                        &tx,
+                    );
+                }
+            }
+        });
+    }
+    {
+        let w = app.as_weak();
+        let tx = tx.clone();
         app.on_connect_request(move |s, sh, u, p| {
             if let Some(a) = w.upgrade() {
                 send(
@@ -705,6 +787,14 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod listing_tests {
     use super::*;
+
+    #[test]
+    fn rename_requires_a_single_nonempty_name() {
+        for name in ["", "  ", ".", "..", "a/b", "a\\b", "a\0b"] {
+            assert!(!valid_entry_name(name), "{name:?}");
+        }
+        assert!(valid_entry_name("新文件.txt"));
+    }
 
     #[test]
     fn sort_uses_numeric_keys_and_keeps_directories_first() {
