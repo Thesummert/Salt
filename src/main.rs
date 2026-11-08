@@ -97,8 +97,10 @@ fn show_listing(ui: &slint::Weak<App>, c: &Connection, entries: Vec<(String, boo
             .collect();
         app.set_entries(ModelRc::new(VecModel::from(entries)));
         app.set_selected("".into());
+        app.set_selected_directory(false);
         app.set_connected(true);
-        app.set_preview_text("选择文件后点击预览".into());
+        app.set_preview_text("".into());
+        app.set_preview_image(Default::default());
         app.set_showing_image(false);
     });
 }
@@ -524,9 +526,20 @@ fn main() -> Result<()> {
                 });
                 continue;
             }
+            let preview_name = match &cmd {
+                Command::Preview(name) => Some(name.clone()),
+                _ => None,
+            };
             let result = runtime.block_on(run_command(cmd, &mut state, &weak, &mut history));
             if let Err(e) = result {
-                status(&weak, format!("操作失败：{e:#}"));
+                let message = format!("操作失败：{e:#}");
+                update(&weak, move |app| {
+                    app.set_status(message.clone().into());
+                    if preview_name.as_deref() == Some(app.get_selected().as_str()) {
+                        app.set_preview_text(message.into());
+                        app.set_showing_image(false);
+                    }
+                });
             }
             update(&weak, |app| app.set_busy(false));
         }
@@ -633,6 +646,9 @@ fn main() -> Result<()> {
         let tx = tx.clone();
         app.on_preview(move |name| {
             if let Some(a) = w.upgrade() {
+                a.set_preview_text("正在加载预览…".into());
+                a.set_preview_image(Default::default());
+                a.set_showing_image(false);
                 send(Command::Preview(name.to_string()), &a, &tx);
             }
         });

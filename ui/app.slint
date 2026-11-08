@@ -16,9 +16,11 @@ export component App inherits Window {
     in-out property <bool> connected: false;
     in-out property <bool> show-connection: true;
     in-out property <bool> busy: false;
-    in-out property <string> preview-text: "选择文件后点击预览";
+    in-out property <string> preview-text: "";
     in-out property <image> preview-image;
     in-out property <bool> showing-image: false;
+    private property <bool> preview-visible: root.selected != "" && !root.selected-directory;
+    private property <float> preview-ratio: 0.4;
     in property <[Entry]> entries;
     in-out property <int> listing-generation: 0;
     callback thumbnail-request(string, int, int);
@@ -91,10 +93,17 @@ export component App inherits Window {
             Button { text: "下载"; enabled: root.connected && !root.busy && root.selected != "" && !root.selected-directory; clicked => { root.download(root.selected); } }
             Button { text: "预览"; enabled: root.connected && !root.busy && root.selected != "" && !root.selected-directory; clicked => { root.preview(root.selected); } }
         }
-        HorizontalBox {
-            spacing: 14px; vertical-stretch: 1;
+        content := Rectangle {
+            vertical-stretch: 1;
+            min-width: root.preview-visible ? 530px : 276px;
+            min-height: 240px;
+            private property <length> panel-width: self.width - 16px - (root.preview-visible ? 14px : 0px);
+            private property <length> file-width: root.preview-visible
+                ? clamp(self.panel-width * (1 - root.preview-ratio), 260px, self.panel-width - 240px)
+                : self.panel-width;
             Rectangle {
-                background: white; border-radius: 12px; horizontal-stretch: 3;
+                x: 8px; y: 8px; width: content.file-width; height: content.height - 16px;
+                background: white; border-radius: 12px;
                 VerticalBox {
                     padding: 16px; spacing: 10px;
                     HorizontalBox {
@@ -130,17 +139,46 @@ export component App inherits Window {
                                 Text { text: entry.directory ? "›" : entry.detail; color: #9aa5b5; font-size: entry.directory ? 22px : 12px; vertical-alignment: center; }
                             }
                             init => { if !entry.directory && !entry.has-thumbnail { root.thumbnail-request(entry.name, index, root.listing-generation); } }
-                            row-touch := TouchArea { clicked => { root.selected = entry.name; root.selected-directory = entry.directory; } double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } } }
+                            row-touch := TouchArea {
+                                clicked => {
+                                    if !root.busy {
+                                        root.selected = entry.name;
+                                        root.selected-directory = entry.directory;
+                                        if !entry.directory { root.preview(entry.name); }
+                                    }
+                                }
+                                double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } }
+                            }
                         }
                     }
                 }
             }
-            Rectangle {
-                background: white; border-radius: 12px; horizontal-stretch: 2;
+            if root.preview-visible: Rectangle {
+                x: 8px + content.file-width; y: 8px; width: 14px; height: content.height - 16px;
+                Rectangle {
+                    width: 3px; height: min(64px, parent.height); border-radius: 2px;
+                    background: resize-touch.pressed || resize-touch.has-hover ? #445fe8 : #cbd2df;
+                }
+                resize-touch := TouchArea {
+                    mouse-cursor: ew-resize;
+                    moved => {
+                        if self.pressed {
+                            root.preview-ratio = clamp(1 - (
+                                self.absolute-position.x + self.mouse-x - self.pressed-x
+                                - content.absolute-position.x - 8px
+                            ) / content.panel-width, 240px / content.panel-width, 1 - 260px / content.panel-width);
+                        }
+                    }
+                }
+            }
+            if root.preview-visible: Rectangle {
+                x: 8px + content.file-width + 14px; y: 8px;
+                width: content.panel-width - content.file-width; height: content.height - 16px;
+                background: white; border-radius: 12px;
                 VerticalBox {
                     padding: 16px; spacing: 10px;
                     Text { text: "预览"; color: #273248; font-size: 15px; font-weight: 700; }
-                    Text { text: root.selected == "" ? "选择文件以查看内容" : root.selected; color: #9aa3b2; font-size: 12px; overflow: elide; }
+                    Text { text: root.selected; color: #9aa3b2; font-size: 12px; overflow: elide; }
                     Rectangle { height: 1px; background: #eef0f4; }
                     if root.showing-image: Image { source: root.preview-image; image-fit: contain; vertical-stretch: 1; }
                     if !root.showing-image: TextEdit { text: root.preview-text; read-only: true; vertical-stretch: 1; }
