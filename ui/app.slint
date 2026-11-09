@@ -1,6 +1,6 @@
-import { Button, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, TextEdit, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
 
-export struct Entry { name: string, detail: string, kind: string, modified: string, size-key: string, modified-key: string, directory: bool, link: bool, thumbnail: image, has-thumbnail: bool }
+export struct Entry { name: string, detail: string, kind: string, modified: string, size-key: string, modified-key: string, directory: bool, link: bool, thumbnail: image, has-thumbnail: bool, checked: bool }
 export component App inherits Window {
     // The application uses a fixed light background, so its widgets must use
     // the matching palette even when the operating system is in dark mode.
@@ -51,7 +51,12 @@ export component App inherits Window {
     callback delete-history(int);
     callback navigate(string);
     callback upload();
-    callback download(string);
+    pure callback accepts-files(data-transfer) -> bool;
+    callback drop-files(data-transfer);
+    callback download(string, bool);
+    callback download-checked();
+    callback check-entry(int, bool);
+    in-out property <int> checked-count: 0;
     callback preview(string);
 
     VerticalBox {
@@ -108,7 +113,7 @@ export component App inherits Window {
                 Text { x: 12px; width: parent.width - 24px; text: "/" + root.current-path; vertical-alignment: center; color: #536079; font-size: 13px; overflow: elide; }
             }
             Button { text: "上传文件"; enabled: root.connected && !root.busy; clicked => { root.upload(); } }
-            Button { text: "下载"; enabled: root.connected && !root.busy && root.selected != "" && !root.selected-directory; clicked => { root.download(root.selected); } }
+            Button { text: root.checked-count > 0 ? "下载已勾选 (" + root.checked-count + ")" : "下载"; enabled: root.connected && !root.busy && (root.checked-count > 0 || root.selected != ""); clicked => { if root.checked-count > 0 { root.download-checked(); } else { root.download(root.selected, root.selected-directory); } } }
             Button { text: "预览"; enabled: root.connected && !root.busy && root.selected != "" && !root.selected-directory; clicked => { root.preview(root.selected); } }
         }
         content := Rectangle {
@@ -148,7 +153,7 @@ export component App inherits Window {
                             height: 76px * root.list-scale; border-radius: 8px;
                             background: root.selected == entry.name ? #edf1ff : row-touch.has-hover ? #f6f7fa : white;
                             HorizontalLayout {
-                                padding-left: 10px; padding-right: 14px; spacing: 14px;
+                                padding-left: 40px; padding-right: 14px; spacing: 14px;
                                 Rectangle {
                                     width: 56px * root.list-scale; height: 56px * root.list-scale; border-radius: 9px;
                                     background: entry.directory ? #fff4dc : #eef1f8;
@@ -174,7 +179,7 @@ export component App inherits Window {
                                 Menu {
                                     MenuItem { title: "打开文件夹"; enabled: entry.directory; activated => { root.navigate(entry.name); } }
                                     MenuItem { title: "预览"; enabled: !entry.directory; activated => { root.selected = entry.name; root.selected-directory = false; root.preview(entry.name); } }
-                                    MenuItem { title: "下载"; enabled: !entry.directory; activated => { root.download(entry.name); } }
+                                    MenuItem { title: "下载"; activated => { root.download(entry.name, entry.directory); } }
                                     MenuSeparator { }
                                     MenuItem { title: "重命名"; activated => { root.rename-source = entry.name; root.rename-value = entry.name; root.renaming = true; } }
                                     MenuItem { title: "删除"; activated => { root.delete-request(entry.name, entry.directory, entry.link); } }
@@ -198,6 +203,7 @@ export component App inherits Window {
                                 double-clicked => { if entry.directory && !root.busy { root.navigate(entry.name); } }
                             }
                             }
+                            CheckBox { x: 8px; y: (parent.height - self.height) / 2; checked: entry.checked; enabled: !root.busy; toggled => { root.check-entry(index, self.checked); } }
                         }
                     }
                     if root.entries.length > 0 && root.icon-view: grid := ListView {
@@ -235,7 +241,7 @@ export component App inherits Window {
                                 Menu {
                                     MenuItem { title: "打开文件夹"; enabled: root.entries[entry-index].directory; activated => { root.navigate(root.entries[entry-index].name); } }
                                     MenuItem { title: "预览"; enabled: !root.entries[entry-index].directory; activated => { root.selected = root.entries[entry-index].name; root.selected-directory = false; root.preview(root.entries[entry-index].name); } }
-                                    MenuItem { title: "下载"; enabled: !root.entries[entry-index].directory; activated => { root.download(root.entries[entry-index].name); } }
+                                    MenuItem { title: "下载"; activated => { root.download(root.entries[entry-index].name, root.entries[entry-index].directory); } }
                                     MenuSeparator { }
                                     MenuItem { title: "重命名"; activated => { root.rename-source = root.entries[entry-index].name; root.rename-value = root.entries[entry-index].name; root.renaming = true; } }
                                     MenuItem { title: "删除"; activated => { root.delete-request(root.entries[entry-index].name, root.entries[entry-index].directory, root.entries[entry-index].link); } }
@@ -253,11 +259,17 @@ export component App inherits Window {
                                         double-clicked => { if root.entries[entry-index].directory && !root.busy { root.navigate(root.entries[entry-index].name); } }
                                     }
                             }
+                                    CheckBox { x: 4px; y: 4px; checked: root.entries[entry-index].checked; enabled: !root.busy; toggled => { root.check-entry(entry-index, self.checked); } }
                                 }
                             }
                         }
                     }
                 }
+            }
+            DropArea {
+                x: 8px; y: 8px; width: content.file-width; height: content.height - 16px;
+                can-drop(event) => { root.connected && !root.busy && root.accepts-files(event.data) ? DragAction.copy : DragAction.none }
+                dropped(event) => { root.drop-files(event.data); return DragAction.copy; }
             }
             if root.preview-visible: Rectangle {
                 x: 8px + content.file-width; y: 8px; width: 14px; height: content.height - 16px;

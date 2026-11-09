@@ -5,7 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-slint = "1.18"
+slint = { version = "1.18", features = ["backend-qt"] }
 smb2 = "0.37"
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "time", "sync"] }
 rfd = "0.15"
